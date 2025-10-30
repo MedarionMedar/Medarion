@@ -1,0 +1,206 @@
+use anchor_lang::prelude::*;
+use anchor_spl::token::{self, Token, TokenAccount, Transfer, Burn, Mint};
+
+declare_id!("8zCqg1kP6Z9G7X2jVnK5M4H3wD1f9qQ0gT6Y2L3J4A7R");
+
+const MEDAR_REWARD_AMOUNT: u64 = 10_000_000;
+const MEDAR_BURN_PERCENT: u64 = 5;
+
+#[program]
+pub mod reward_distributor_program {
+    use super::*;
+
+    pub fn initialize_reward_config(ctx: Context<InitRewardConfig>, slashing_percent: u8) -> Result<()> {
+        let cfg = &mut ctx.accounts.reward_config;
+        cfg.slashing_percent = slashing_percent;
+        cfg.bump = *ctx.bumps.get("reward_config").unwrap();
+        cfg.admin = ctx.accounts.admin.key();
+        Ok(())
+    }
+
+    pub fn initialize_reward_vault(ctx: Context<InitRewardVault>) -> Result<()> {
+        let vault = &mut ctx.accounts.reward_vault_state;
+        vault.total_distributed = 0;
+        vault.total_burned = 0;
+        vault.bump = *ctx.bumps.get("reward_vault").unwrap();
+        Ok(())
+    }
+
+    pub fn issue_reward(ctx: Context<IssueReward>) -> Result<()> {
+        let claim_state = &mut ctx.accounts.claimer_state;
+        let identity_proof = &ctx.accounts.identity_proof_account;
+        let current_epoch = Clock::get()?.epoch;
+        require!(claim_state.last_claim_epoch < current_epoch, RewardError::EpochClaimLimitReached);
+        require!(identity_proof.is_valid, RewardError::InvalidIdentityProof);
+        require_keys_eq!(identity_proof.claimer_key, ctx.accounts.claimer.key(), RewardError::ProofKeyMismatch);
+        let burn_amount = MEDAR_REWARD_AMOUNT.checked_mul(MEDAR_BURN_PERCENT).ok_or(RewardError::CalculationError)?.checked_div(100).ok_or(RewardError::CalculationError)?;
+        let net_reward = MEDAR_REWARD_AMOUNT.checked_sub(burn_amount).ok_or(RewardError::CalculationError)?;
+        let reward_vault_authority_bump = *ctx.bumps.get("reward_vault_authority").unwrap();
+        let authority_seeds = &[b"vault_authority".as_ref(), &[reward_vault_authority_bump]];
+        let signer = &[&authority_seeds[..]];
+        
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.reward_vault.to_account_info(),
+            to: ctx.accounts.claimer_token_account.to_account_info(),
+            authority: ctx.accounts.reward_vault_authority.to_account_info(),
+        };
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer);
+        token::transfer(cpi_ctx, net_reward)?;
+        
+        let burn_accounts = Burn {
+            mint: ctx.accounts.medar_mint.to_account_info(),
+            from: ctx.accounts.reward_vault.to_account_info(),
+            authority: ctx.accounts.reward_vault_authority.to_account_info(),
+        };
+        let burn_ctx = CpiContext::new_with_signer(cpi_program, burn_accounts, signer);
+        token::burn(burn_ctx, burn_amount)?;
+        
+        claim_state.last_claim_epoch = current_epoch;
+        claim_state.total_claimed = claim_state.total_claimed.checked_add(net_reward).unwrap();
+        let vault_state = &mut ctx.accounts.reward_vault_state;
+        vault_state.total_distributed = vault_state.total_distributed.checked_add(net_reward).unwrap();
+        vault_state.total_burned = vault_state.total_burned.checked_add(burn_amount).unwrap();
+        Ok(())
+    }
+
+    pub fn slash_validator(ctx: Context<SlashValidator>, stake_amount: u64) -> Result<()> {
+        let config = &ctx.accounts.reward_config;
+        require_keys_eq!(ctx.accounts.governance_signer.key(), config.admin, RewardError::UnauthorizedOracle);
+        let slash_percent_u64 = config.slashing_percent as u64;
+        let slash_amount = stake_amount.checked_mul(slash_percent_u64).ok_or(RewardError::CalculationError)?.checked_div(100).ok_or(RewardError::CalculationError)?;
+        if slash_amount == 0 {
+            return Err(RewardError::ZeroSlashingAmount.into());
+        }
+        let token_authority_bump = *ctx.bumps.get("token_authority").unwrap();
+        let authority_seeds = &[b"token_authority".as_ref(), &[token_authority_bump]];
+        let signer = &[&authority_seeds[..]];
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.validator_stake_token_account.to_account_info(),
+            to: ctx.accounts.slashed_token_destination.to_account_info(),
+            authority: ctx.accounts.token_authority.to_account_info(),
+        };
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer);
+        token::transfer(cpi_ctx, slash_amount)?;
+        Ok(())
+    }
+}
+
+#[account]
+pub struct RewardConfig {
+    pub slashing_percent: u8,
+    pub bump: u8,
+    pub admin: Pubkey,
+}
+
+#[account]
+pub struct RewardVaultState {
+    pub total_distributed: u64,
+    pub total_burned: u64,
+    pub bump: u8,
+}
+
+#[account]
+pub struct ClaimerState {
+    pub claimer_key: Pubkey,
+    pub last_claim_epoch: u64,
+    pub total_claimed: u64,
+    pub bump: u8,
+}
+
+#[account]
+pub struct IdentityProofAccount {
+    pub claimer_key: Pubkey,
+    pub oracle_signature: [u8; 64],
+    pub is_valid: bool,
+    pub bump: u8,
+}
+
+#[derive(Accounts)]
+pub struct InitRewardConfig<'info> {
+    #[account(init, seeds = [b"reward_config"], bump, payer = admin, space = 8 + 1 + 1 + 32)]
+    pub reward_config: Account<'info, RewardConfig>,
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct InitRewardVault<'info> {
+    #[account(init, seeds = [b"reward_vault"], bump, payer = admin, space = 8 + 8 + 8 + 1)]
+    pub reward_vault_state: Account<'info, RewardVaultState>,
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct IssueReward<'info> {
+    #[account(seeds = [b"reward_config"], bump = reward_config.bump)]
+    pub reward_config: Account<'info, RewardConfig>,
+
+    #[account(mut, seeds = [b"reward_vault"], bump = reward_vault_state.bump)]
+    pub reward_vault_state: Account<'info, RewardVaultState>,
+
+    #[account(mut)]
+    pub reward_vault: Account<'info, TokenAccount>,
+
+    #[account(
+        seeds = [b"vault_authority"],
+        bump
+    )]
+    pub reward_vault_authority: AccountInfo<'info>,
+
+    #[account(init_if_needed, seeds = [b"claimer_state", claimer.key().as_ref()], bump, payer = claimer, space = 8 + 32 + 8 + 8 + 1)]
+    pub claimer_state: Account<'info, ClaimerState>,
+
+    pub identity_proof_account: Account<'info, IdentityProofAccount>,
+
+    #[account(mut)]
+    pub claimer: Signer<'info>,
+
+    #[account(mut)]
+    pub claimer_token_account: Account<'info, TokenAccount>,
+
+    pub medar_mint: Account<'info, Mint>,
+
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+    pub clock: Sysvar<'info, Clock>,
+}
+
+#[derive(Accounts)]
+pub struct SlashValidator<'info> {
+    #[account(seeds = [b"reward_config"], bump = reward_config.bump)]
+    pub reward_config: Account<'info, RewardConfig>,
+
+    pub governance_signer: Signer<'info>,
+
+    #[account(mut)]
+    pub validator_stake_token_account: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub slashed_token_destination: Account<'info, TokenAccount>,
+
+    #[account(seeds = [b"token_authority"], bump)]
+    pub token_authority: AccountInfo<'info>,
+
+    pub token_program: Program<'info, Token>,
+}
+
+#[error_code]
+pub enum RewardError {
+    #[msg("Claimer has already reached the reward limit for the current epoch.")]
+    EpochClaimLimitReached,
+    #[msg("Invalid identity proof provided.")]
+    InvalidIdentityProof,
+    #[msg("Proof key mismatch.")]
+    ProofKeyMismatch,
+    #[msg("Unauthorized oracle or governance signer.")]
+    UnauthorizedOracle,
+    #[msg("Calculation error during arithmetic operation.")]
+    CalculationError,
+    #[msg("Calculated slashing amount is zero.")]
+    ZeroSlashingAmount,
+}

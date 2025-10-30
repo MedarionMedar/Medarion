@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "medanior-validator.fullname". }}
+  labels:
+    {{- include "medanior-validator.labels". | nindent 4 }}
+spec:
+  template:
+    spec:
+      containers:
+        - name: validator
+          image: "solana/solana-validator:{{.Values.solana.tag }}"
+          command: ["sh", "-c", "solana-validator --identity /mnt/key-vault/identity.json --ledger /mnt/ledger --entrypoint {{.Values.solana.entrypoint }} --rpc-port 8899 --rpc-bind-address 0.0.0.0"]
+          ports:
+            - containerPort: 8000
+              name: gossip
+            - containerPort: 80
+              name: metrics
+            - containerPort: 8899
+              name: rpc
+          volumeMounts:
+            - name: identity-key-volume
+              mountPath: /mnt/key-vault
+              readOnly: true
+            - name: ledger-volume
+              mountPath: /mnt/ledger
+      volumes:
+        - name: identity-key-volume
+          secret:
+            secretName: {{.Values.secrets.validatorIdentityKeySecretName }}
+            defaultMode: 0400
+            items:
+              - key: identity.json
+                path: identity.json
+
+        - name: ledger-volume
+          persistentVolumeClaim:
+            claimName: solana-ledger-pvc

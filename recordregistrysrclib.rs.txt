@@ -1,0 +1,116 @@
+use anchor_lang::prelude::*;
+
+declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
+
+const MAX_RECORD_DATA_SIZE: usize = 16 * 1024;
+
+#[program]
+pub mod record_registry_program {
+    use super::*;
+
+    pub fn initialize_registry_config(ctx: Context<InitRegistryConfig>) -> Result<()> {
+        let cfg = &mut ctx.accounts.registry_config;
+        cfg.bump = *ctx.bumps.get("registry_config").unwrap();
+        cfg.authority = ctx.accounts.admin.key();
+        Ok(())
+    }
+
+    pub fn register_record(ctx: Context<RegisterRecord>, record_id: u64, record_data: Vec<u8>, data_integrity_hash: [u8; 32]) -> Result<()> {
+        require!(record_data.len() <= MAX_RECORD_DATA_SIZE, RegistryError::DataTooLarge);
+        require_keys_eq!(ctx.accounts.registry_config.authority, ctx.accounts.authority.key(), RegistryError::Unauthorized);
+        let record = &mut ctx.accounts.record_account;
+        record.authority = ctx.accounts.authority.key();
+        record.record_id = record_id;
+        record.is_active = true;
+        record.data = record_data;
+        record.data_integrity_hash = data_integrity_hash;
+        record.last_updated_slot = Clock::get()?.slot;
+        record.bump = *ctx.bumps.get("record_account").unwrap();
+        Ok(())
+    }
+
+    pub fn update_record(ctx: Context<UpdateRecord>, new_data: Vec<u8>, new_data_integrity_hash: [u8; 32]) -> Result<()> {
+        require!(new_data.len() <= MAX_RECORD_DATA_SIZE, RegistryError::DataTooLarge);
+        let record = &mut ctx.accounts.record_account;
+        require_keys_eq!(record.authority, ctx.accounts.authority.key(), RegistryError::AuthorityMismatch);
+        record.data = new_data;
+        record.data_integrity_hash = new_data_integrity_hash;
+        record.last_updated_slot = Clock::get()?.slot;
+        Ok(())
+    }
+}
+
+#[account]
+pub struct RegistryConfig {
+    pub bump: u8,
+    pub authority: Pubkey,
+}
+
+#[account]
+pub struct MedicalRecord {
+    pub authority: Pubkey,
+    pub record_id: u64,
+    pub is_active: bool,
+    pub data: Vec<u8>,
+    pub data_integrity_hash: [u8; 32],
+    pub last_updated_slot: u64,
+    pub bump: u8,
+}
+
+#[derive(Accounts)]
+pub struct InitRegistryConfig<'info> {
+    #[account(init, seeds = [b"registry_config"], bump, payer = admin, space = 8 + 1 + 32)]
+    pub registry_config: Account<'info, RegistryConfig>,
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(record_id: u64)]
+pub struct RegisterRecord<'info> {
+    #[account(
+        init,
+        seeds = [b"medical_record", record_id.to_le_bytes().as_ref()],
+        bump,
+        payer = authority,
+        space = 8 + 32 + 8 + 1 + 4 + MAX_RECORD_DATA_SIZE + 32 + 8 + 1
+    )]
+    pub record_account: Account<'info, MedicalRecord>,
+
+    #[account(
+        seeds = [b"registry_config"],
+        bump = registry_config.bump
+    )]
+    pub registry_config: Account<'info, RegistryConfig>,
+
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    pub system_program: Program<'info, System>,
+    pub clock: Sysvar<'info, Clock>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateRecord<'info> {
+    #[account(
+        mut,
+        seeds = [b"medical_record", record_account.record_id.to_le_bytes().as_ref()],
+        bump = record_account.bump,
+        has_one = authority
+    )]
+    pub record_account: Account<'info, MedicalRecord>,
+
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    pub clock: Sysvar<'info, Clock>,
+}
+
+#[error_code]
+pub enum RegistryError {
+    #[msg("Authority mismatch")]
+    AuthorityMismatch,
+    #[msg("Medical record data exceeds maximum size")]
+    DataTooLarge,
+    #[msg("Unauthorized action")]
+    Unauthorized,
+}

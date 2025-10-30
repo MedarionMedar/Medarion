@@ -1,0 +1,113 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model PiiMap {
+  id              String      @id @default(uuid())
+  recordId        String      @unique
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  encryptedNationalId Json
+  encryptedName       Json
+  encryptedDob        Json
+  encryptionKeyDigest String @db.VarChar(64)
+  encryptionVersion   Int @default(1)
+
+  @@index([recordId])
+  @@index([encryptionKeyDigest])
+  @@index([createdAt])
+}
+
+model MedicalRecord {
+  id                String   @id @default(uuid())
+  patientId         String   @unique
+  hospitalId        String
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  encryptedDiagnoses      Json
+  encryptedMedications    Json
+  encryptedProcedures     Json
+  encryptedLabResults     Json
+  encryptedImagingReports Json
+  encryptedVitalSigns     Json
+  encryptedAllergies      Json
+  encryptedImmunizations  Json
+  encryptedFamilyHistory  Json
+  encryptedSocialHistory  Json
+  
+  isActive          Boolean  @default(true)
+  lastAccessDate    DateTime?
+  accessLogs        Json?
+  
+  encryptionKeyDigest String @db.VarChar(64)
+  encryptionVersion   Int    @default(1)
+
+  @@index([patientId])
+  @@index([hospitalId])
+  @@index([lastAccessDate])
+  @@index([isActive])
+  @@index([encryptionKeyDigest])
+}
+
+model PatientConsent {
+  id              String   @id @default(uuid())
+  patientId       String
+  hospitalId      String
+  consentType     String
+  granted         Boolean
+  expirationDate  DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  encryptedConsentTerms Json
+  digitalSignature     String?
+  
+  encryptionKeyDigest String @db.VarChar(64)
+  encryptionVersion   Int    @default(1)
+
+  @@index([patientId, hospitalId])
+  @@index([expirationDate])
+  @@index([consentType])
+  @@index([granted])
+}
+
+model AccessLog {
+  id          String   @id @default(uuid())
+  recordId    String
+  accessedBy  String
+  accessType  String
+  timestamp   DateTime @default(now())
+  purpose     String
+  ipAddress   String?
+  
+  encryptedQueryParams Json?
+  
+  encryptionKeyDigest String @db.VarChar(64)
+  encryptionVersion   Int    @default(1)
+
+  @@index([recordId])
+  @@index([accessedBy])
+  @@index([timestamp])
+  @@index([accessType])
+}
+
+model MedarReward {
+  id          String   @id @default(uuid())
+  claimerId   String
+  amount      BigInt
+  burned      BigInt
+  netAmount   BigInt
+  epoch       Int
+  createdAt   DateTime @default(now())
+  
+  @@index([claimerId])
+  @@index([epoch])
+  @@index([createdAt])
+}

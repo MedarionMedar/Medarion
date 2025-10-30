@@ -1,0 +1,130 @@
+use anchor_lang::prelude::*;
+
+declare_id!("D8fJ7N4gYt3L9P0wZ5X6V8M7Q4C2B1A0s3T6U9R4E0F");
+
+const ADJUDICATOR_TIMELOCK_SECONDS: i64 = 14 * 24 * 60 * 60;
+const ADJUDICATOR_TIMELOCK_SLOTS: u64 = 3_024_000;
+
+#[program]
+pub mod governance_dao_program {
+    use super::*;
+
+    pub fn initialize_dao_config(ctx: Context<InitDaoConfig>, admin: Pubkey, initial_seed: [u8;32]) -> Result<()> {
+        let cfg = &mut ctx.accounts.dao_config;
+        cfg.adjudicator_seed = initial_seed;
+        cfg.last_rotation_timestamp = 0;
+        cfg.bump = *ctx.bumps.get("dao_config").unwrap();
+        cfg.admin = admin;
+        Ok(())
+    }
+
+    pub fn propose_adjudicator_seed(ctx: Context<ProposeAdjudicatorSeed>, new_seed: [u8; 32]) -> Result<()> {
+        let rotation_state = &mut ctx.accounts.rotation_state;
+        let clock = &ctx.accounts.clock;
+        require_keys_eq!(ctx.accounts.proposer.key(), ctx.accounts.dao_config.admin, GovernanceError::UnauthorizedProposer);
+        require!(rotation_state.status == RotationStatus::None, GovernanceError::RotationInProgress);
+        rotation_state.proposed_seed = new_seed;
+        rotation_state.proposal_slot = clock.slot;
+        rotation_state.proposal_timestamp = clock.unix_timestamp;
+        rotation_state.status = RotationStatus::Proposed;
+        Ok(())
+    }
+
+    pub fn activate_adjudicator_seed(ctx: Context<ActivateAdjudicatorSeed>) -> Result<()> {
+        let rotation_state = &mut ctx.accounts.rotation_state;
+        let config = &mut ctx.accounts.dao_config;
+        let clock = &ctx.accounts.clock;
+        require!(rotation_state.status == RotationStatus::Proposed, GovernanceError::InvalidRotationState);
+        let current_timestamp = clock.unix_timestamp;
+        let elapsed_seconds = current_timestamp.checked_sub(rotation_state.proposal_timestamp).ok_or(GovernanceError::TimestampError)?;
+        require!(elapsed_seconds >= ADJUDICATOR_TIMELOCK_SECONDS, GovernanceError::TimelockNotExpired);
+        let current_slot = clock.slot;
+        let elapsed_slots = current_slot.checked_sub(rotation_state.proposal_slot).ok_or(GovernanceError::SlotError)?;
+        require!(elapsed_slots >= ADJUDICATOR_TIMELOCK_SLOTS, GovernanceError::TimelockNotExpired);
+        require_keys_eq!(ctx.accounts.governance_authority.key(), config.admin, GovernanceError::UnauthorizedActivator);
+        config.adjudicator_seed = rotation_state.proposed_seed;
+        rotation_state.status = RotationStatus::Activated;
+        rotation_state.proposal_slot = 0;
+        rotation_state.proposal_timestamp = 0;
+        config.last_rotation_timestamp = current_timestamp;
+        Ok(())
+    }
+}
+
+#[derive(PartialEq, AnchorSerialize, AnchorDeserialize, Clone)]
+pub enum RotationStatus {
+    None,
+    Proposed,
+    Activated,
+}
+
+#[account]
+pub struct DaoConfig {
+    pub adjudicator_seed: [u8; 32],
+    pub last_rotation_timestamp: i64,
+    pub bump: u8,
+    pub admin: Pubkey,
+}
+
+#[account]
+pub struct SeedRotationState {
+    pub proposed_seed: [u8; 32],
+    pub proposal_slot: u64,
+    pub proposal_timestamp: i64,
+    pub status: RotationStatus,
+    pub bump: u8,
+}
+
+#[derive(Accounts)]
+pub struct InitDaoConfig<'info> {
+    #[account(init, seeds = [b"dao_config"], bump, payer = admin, space = 8 + 32 + 8 + 1 + 32)]
+    pub dao_config: Account<'info, DaoConfig>,
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ProposeAdjudicatorSeed<'info> {
+    #[account(mut, seeds = [b"dao_config"], bump = dao_config.bump)]
+    pub dao_config: Account<'info, DaoConfig>,
+
+    #[account(init_if_needed, seeds = [b"rotation_state"], bump, payer = proposer, space = 8 + 32 + 8 + 8 + 1 + 1)]
+    pub rotation_state: Account<'info, SeedRotationState>,
+
+    #[account(mut)]
+    pub proposer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+    pub clock: Sysvar<'info, Clock>,
+}
+
+#[derive(Accounts)]
+pub struct ActivateAdjudicatorSeed<'info> {
+    #[account(mut, seeds = [b"dao_config"], bump = dao_config.bump)]
+    pub dao_config: Account<'info, DaoConfig>,
+
+    #[account(mut, seeds = [b"rotation_state"], bump = rotation_state.bump)]
+    pub rotation_state: Account<'info, SeedRotationState>,
+
+    pub governance_authority: Signer<'info>,
+    pub clock: Sysvar<'info, Clock>,
+}
+
+#[error_code]
+pub enum GovernanceError {
+    #[msg("A seed rotation is already in progress.")]
+    RotationInProgress,
+    #[msg("Invalid rotation state for this action.")]
+    InvalidRotationState,
+    #[msg("Mandatory timelock period has not expired.")]
+    TimelockNotExpired,
+    #[msg("Error calculating time difference (timestamp arithmetic error).")]
+    TimestampError,
+    #[msg("Error calculating slot difference (slot arithmetic error).")]
+    SlotError,
+    #[msg("Unauthorized proposer.")]
+    UnauthorizedProposer,
+    #[msg("Unauthorized activator.")]
+    UnauthorizedActivator,
+}

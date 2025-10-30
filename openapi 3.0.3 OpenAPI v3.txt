@@ -1,0 +1,87 @@
+openapi: 3.0.3
+info:
+  title: Medanior MedLedger API - PQC Hardened
+  version: 1.0.0
+
+components:
+  securitySchemes:
+    HospitalmTLS:
+      type: http
+      description: |
+        MUTUAL TLS (mTLS) REQUIRED:
+        This endpoint mandates client certificate authentication during the TLS handshake.
+        The client (Hospital Validator) must present a valid certificate signed by the designated MedLedger CA.
+        This is strictly enforced at the network/gateway layer (e.g., EKS Ingress/ALB).
+    PqcSignatureHeader:
+      type: apiKey
+      in: header
+      name: X-PQC-Public-Key
+      description: Dilithium PQC Public Key (Base64 encoded) used for signature verification.
+  schemas:
+    PQCProof:
+      type: object
+      description: Data structure containing the hybrid quantum-resistant cryptographic proof.
+      properties:
+        pqcPubKey:
+          type: string
+          description: Dilithium Public Key (e.g., 1936 bytes, Base64 encoded).
+          format: byte 
+        hybridSignature:
+          type: string
+          description: Full Dilithium + Ed25519 Hybrid Signature (e.g., 3.4KB, Base64 encoded).
+          format: byte
+        messageHash:
+          type: string
+          description: The hash of the payload signed by the client.
+          format: byte
+      required:
+        - pqcPubKey
+        - hybridSignature
+        - messageHash
+
+paths:
+  /record/register:
+    post:
+      summary: Register a new medical record (Requires Hospital Validator mTLS and PQC Signature)
+      security:
+        - HospitalmTLS:
+        - PqcSignatureHeader:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                recordDetails:
+                  type: object 
+                pqc_proof:
+                  $ref: '#/components/schemas/PQCProof'
+              required:
+                - recordDetails
+                - pqc_proof
+      responses:
+        '200':
+          description: Record registration accepted.
+  /emergency/access:
+    post:
+      summary: Request emergency access to records (Requires PQC Signature)
+      security:
+        - PqcSignatureHeader:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                trustee_id:
+                  type: string
+                pqc_proof:
+                  $ref: '#/components/schemas/PQCProof' 
+              required:
+                - trustee_id
+                - pqc_proof
+      responses:
+        '200':
+          description: Emergency access request received.
